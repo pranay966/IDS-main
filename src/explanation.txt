@@ -1,0 +1,127 @@
+Step 1: Selecting the Network Interface
+When the IDS starts, the first step is choosing which network adapter to monitor.
+Your computer may have many interfaces such as:
+- Wi-Fi
+- Ethernet
+- Loopback
+- Bluetooth
+- Virtual adapters
+
+Using Scapy + Npcap, the system retrieves all available interfaces using `get_windows_if_list()`.
+Earlier, Windows returned only GUID IDs (e.g., `{6A9998D5-7440-4F37-9D01-DC2DE462840A}`), which was confusing.
+We modified the code so the frontend shows human-readable names like "Wi-Fi" or "Ethernet".
+For monitoring internet traffic, you select your active connection (like Wi-Fi).
+
+---------------------------------------------------------
+
+Step 2: Starting Packet Capture
+Once the interface is selected, the system starts capturing packets from the network.
+This is done using Scapy's `sniff()` function, listening through the Npcap driver.
+Npcap works as a bridge between the OS and the IDS:
+
+    [Network Card] -> [Npcap Driver] -> [Scapy Sniffer] -> [IDS Dashboard]
+
+At this stage, the IDS is capturing live live packets in real time.
+
+---------------------------------------------------------
+
+Step 3: Capturing All Types of Network Traffic
+Originally, the system only captured IPv4. Modern traffic uses both IPv4 and IPv6.
+Example:
+- IPv4: `192.168.29.166`
+- IPv6: `2405:201:c411:e905:dd0c:978a:b441:c1d`
+
+The packet parser was updated to support:
+- IPv4 & IPv6
+- TCP & UDP
+- ICMP & ICMPv6
+
+This allows detection of web browsing, DNS queries, HTTPS, Ping requests, and HTTP/3 QUIC.
+
+---------------------------------------------------------
+
+Step 4: Packet Parsing
+Once captured, the IDS extracts important information:
+- Time: When captured
+- Protocol: TCP, UDP, ICMP
+- Source IP: Who sent it
+- Destination IP: Where it is going
+- Ports: Sender & Receiver ports
+- Length: Packet size
+- Flags: TCP control flags
+
+Example: `TCP | 192.168.29.166:50869 → 34.54.84.110:443 | Length: 85 | Flags: PA`
+Meaning: Your laptop sent actual data to a secure HTTPS server. These propagate to the Live Feed.
+
+---------------------------------------------------------
+
+Step 5: Rule-Based Safety Filtering
+Before feeding packets to Machine Learning, the IDS does a rule-based check.
+Most internet traffic is completely normal. 
+
+Rules automatically classify the following as explicitly SAFE:
+- Port 80 (HTTP)
+- Port 443 (HTTPS)
+- Port 53 (DNS)
+
+Example: `192.168.29.166 → google.com:443` is normal web traffic and securely bypasses the ML model, removing false alarms.
+
+---------------------------------------------------------
+
+Step 6: Identifying Suspicious Traffic
+Packets that do not match the safe rules are marked as "Suspicious".
+Suspicious patterns include:
+- Massive SYN packets without ACKs (SYN Flood)
+- Rapid connections to many different ports (Port Scan)
+- Extremely high packet rates
+- Unusual protocols or unregistered ports
+
+Only these suspicious packets are forwarded to the Machine Learning module for deep evaluation.
+
+---------------------------------------------------------
+
+Step 7: Feature Extraction for Machine Learning
+The system converts the raw suspicious packet data into numerical features for the ML model.
+Data like `protocol_type`, `packet_length`, `tcp_flags`, and `packet_count` are transformed into a mathematical vector.
+
+Example Feature Vector:
+`[6, 443, 85, 1, 0, 10]`
+
+This array is what the ML model actually analyzes.
+
+---------------------------------------------------------
+
+Step 8: Machine Learning Attack Detection
+The system runs the vector through one of the supported models:
+- Random Forest
+- SVM
+- ANN / MLP
+- CNN (Deep Learning)
+
+The model predicts `0` (Normal Traffic) or `1` (Malicious Traffic).
+
+---------------------------------------------------------
+
+Step 9: Mapping Output to Human-Readable Results
+Models only output math (like `0` or `1`).
+The backend utilities map these exactly to readable statuses:
+- `0` → SAFE
+- `1` → MALICIOUS (or a specific attack name like DOS/PROBE)
+
+---------------------------------------------------------
+
+Step 10: Displaying Results on the Dashboard
+The frontend UI updates live with a precise breakdown:
+- Total packets captured
+- Safe Traffic count
+- Suspicious Checked count
+- Malicious Detected count
+
+If there is no malicious packet found, the system glows Green and announces NORMAL TRAFFIC.
+If a breach occurs, the system glows Red and announces THREAT DETECTED with the specific attack type.
+
+---------------------------------------------------------
+
+Step 11: Continuous Real-Time Monitoring
+The IDS continuously loops through tracking, parsing, filtering, and ML prediction at lightning speed natively.
+This mirrors professional enterprise intrusion detection tools like Snort, Suricata, and Zeek, providing elite real-time network security.

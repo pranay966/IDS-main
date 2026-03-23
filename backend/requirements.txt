@@ -1,0 +1,16 @@
+flask==3.0.3
+flask-cors==4.0.1
+scikit-learn==1.4.2
+pandas==2.2.2
+numpy==1.26.4
+joblib==1.4.2
+
+# Packet capture (requires Npcap on Windows: https://npcap.com/)
+scapy==2.5.0
+
+# Optional: tshark/Wireshark-based capture fallback
+# pyshark==0.6
+
+# PyTorch (CPU-only, for cnn_model.pth):
+# Run this separately in terminal:
+# pip install torch --index-url https://download.pytorch.org/whl/cpu
