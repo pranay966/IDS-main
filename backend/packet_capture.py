@@ -11,7 +11,7 @@ from typing import Optional
 
 # Lazy-import scapy so app.py can still start even if Npcap isn't installed
 try:
-    from scapy.all import sniff, get_if_list, conf
+    from scapy.all import sniff, get_if_list, conf, Raw
     from scapy.layers.inet import IP, TCP, UDP, ICMP
     from scapy.layers.inet6 import IPv6, ICMPv6EchoRequest, ICMPv6EchoReply
     from scapy.layers.dns import DNS, DNSQR
@@ -20,9 +20,60 @@ except ImportError:
     SCAPY_AVAILABLE = False
 
 
+import os
+
+# ---------------------------------------------------------------------------
+# Malicious keyword list — dynamically loads from blacklist.txt
+# ---------------------------------------------------------------------------
+def _load_malicious_keywords():
+    try:
+        path = os.path.join(os.path.dirname(__file__), "blacklist.txt")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                # Store keywords as bytes for faster exact substring matching in scapy payloads
+                return [line.strip().lower() for line in f if line.strip() and not line.startswith("#")]
+    except Exception as e:
+        print(f"Warning: Could not load blacklist.txt: {e}")
+    # Fallback default list
+    return ["malware", "phishing", "eicar", "malicious"]
+
+MALICIOUS_KEYWORDS = _load_malicious_keywords()
+
 # ---------------------------------------------------------------------------
 # Packet summary structure (what we keep in RAM per packet)
 # ---------------------------------------------------------------------------
+def _extract_http_host(pkt) -> Optional[str]:
+    """Try to extract the HTTP Host header from a raw TCP payload."""
+    if not SCAPY_AVAILABLE:
+        return None
+    if Raw not in pkt:
+        return None
+    try:
+        payload = pkt[Raw].load.decode("utf-8", "ignore")
+        for line in payload.split("\r\n"):
+            if line.lower().startswith("host:"):
+                return line.split(":", 1)[1].strip().lower()
+    except Exception:
+        pass
+    return None
+
+
+def _check_malicious_keyword(summary: dict) -> Optional[str]:
+    """Return the matched malicious keyword/domain if any field triggers it."""
+    # Fields to inspect
+    targets = [
+        (summary.get("dns_query") or "").lower(),
+        (summary.get("http_host") or "").lower(),
+    ]
+    for target in targets:
+        if not target:
+            continue
+        for kw in MALICIOUS_KEYWORDS:
+            if kw in target:
+                return kw
+    return None
+
+
 def _summarise_packet(pkt) -> Optional[dict]:
     """Convert a scapy packet into a lightweight dict."""
     if not SCAPY_AVAILABLE:
@@ -40,6 +91,7 @@ def _summarise_packet(pkt) -> Optional[dict]:
         "src_port": 0,
         "dst_port": 0,
         "dns_query": None,
+        "http_host": None,
         "duration": 0,
         "land": 0,
         "wrong_fragment": 0,
@@ -65,13 +117,15 @@ def _summarise_packet(pkt) -> Optional[dict]:
             summary["urgent"] = pkt[TCP].urgptr
             if summary["src_ip"] == summary["dst_ip"] and summary["src_port"] == summary["dst_port"]:
                 summary["land"] = 1
+            # Pull HTTP Host header for DPI
+            summary["http_host"] = _extract_http_host(pkt)
 
         elif UDP in pkt:
             summary["protocol"] = "UDP"
             summary["src_port"] = pkt[UDP].sport
             summary["dst_port"] = pkt[UDP].dport
 
-            # Extract DNS query name (useful for “malicious URL/domain” UI)
+            # Extract DNS query name (useful for "malicious URL/domain" UI)
             if pkt.haslayer(DNSQR) and DNSQR in pkt:
                 try:
                     qname = pkt[DNSQR].qname
@@ -83,7 +137,7 @@ def _summarise_packet(pkt) -> Optional[dict]:
 
         elif ICMP in pkt or ICMPv6EchoRequest in pkt or ICMPv6EchoReply in pkt:
             summary["protocol"] = "ICMP"
-            
+
     return summary
 
 
@@ -103,6 +157,7 @@ class CaptureSession:
         self._thread: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
         self.error: Optional[str] = None
+        self.url_threat_info: Optional[dict] = None
 
         # SSE subscribers: list of queue.Queue objects
         self._subscribers: list = []
@@ -150,9 +205,34 @@ class CaptureSession:
 
     def _handle_packet(self, pkt):
         summary = _summarise_packet(pkt)
-        if summary:
-            self.packets.append(summary)
-            self._broadcast({"type": "packet", "data": summary})
+        if not summary:
+            return
+
+        self.packets.append(summary)
+        self._broadcast({"type": "packet", "data": summary})
+
+        # ── Deep Packet Inspection: malicious keyword check ──────────────────
+        matched_keyword = _check_malicious_keyword(summary)
+        if matched_keyword and self.running:
+            # Build detailed threat event payload
+            threat_event = {
+                "type": "threat_url",
+                "keyword": matched_keyword,
+                "domain": summary.get("dns_query") or summary.get("http_host") or "unknown",
+                "src_ip": summary.get("src_ip"),
+                "dst_ip": summary.get("dst_ip"),
+                "src_port": summary.get("src_port"),
+                "dst_port": summary.get("dst_port"),
+                "protocol": summary.get("protocol"),
+                "timestamp": summary.get("timestamp"),
+                "packet_length": summary.get("length"),
+            }
+            # Save this in the session so ML analysis can sync with it
+            self.url_threat_info = threat_event
+            # Broadcast threat before stopping so SSE clients receive it
+            self._broadcast(threat_event)
+            # Auto-stop capture
+            self.stop()
 
     # ------------------------------------------------------------------
     # SSE pub/sub helpers

@@ -10,6 +10,9 @@ import {
     Server,
     Layers,
     Loader2,
+    X,
+    ShieldAlert,
+    Search,
 } from 'lucide-react'
 import { useApp } from '../context/AppContext'
 import './LiveMonitor.css'
@@ -58,6 +61,20 @@ interface DetectionResult {
     decisionRule?: string
 }
 
+// Threat event from the 'threat_url' SSE broadcast
+interface ThreatUrlEvent {
+    type: 'threat_url'
+    keyword: string
+    domain: string
+    src_ip: string | null
+    dst_ip: string | null
+    src_port: number
+    dst_port: number
+    protocol: string
+    timestamp: number
+    packet_length: number
+}
+
 const MODEL_OPTIONS: { key: ModelKey; label: string }[] = [
     { key: 'rf', label: 'Random Forest' },
     { key: 'svm', label: 'SVM' },
@@ -82,6 +99,10 @@ export default function LiveMonitor() {
     const [simAttackKind, setSimAttackKind] = useState<SimAttackKind>('port_scan')
     const [error, setError] = useState<string | null>(null)
     const [scapyAvailable, setScapyAvailable] = useState<boolean | null>(null)
+
+    // ── Malicious URL alert state ──────────────────────────────────────────
+    const [threatAlert, setThreatAlert] = useState<ThreatUrlEvent | null>(null)
+    const [showDetailedAnalysis, setShowDetailedAnalysis] = useState(false)
 
     const eventSourceRef = useRef<EventSource | null>(null)
     const tableRef = useRef<HTMLDivElement>(null)
@@ -116,6 +137,15 @@ export default function LiveMonitor() {
         es.onmessage = (ev) => {
             try {
                 const msg = JSON.parse(ev.data)
+
+                // ── Malicious URL threat detected ──────────────────────
+                if (msg.type === 'threat_url') {
+                    setThreatAlert(msg as ThreatUrlEvent)
+                    setCapturing(false)
+                    es.close()
+                    return
+                }
+
                 if (msg.type === 'packet' && msg.data) {
                     const d = msg.data
                     const row: PacketRow = {
@@ -192,6 +222,8 @@ export default function LiveMonitor() {
         setPackets([])
         setStats({ total: 0, tcp: 0, udp: 0, icmp: 0, other: 0, pps: 0 })
         packetIdRef.current = 0
+        setThreatAlert(null)
+        setShowDetailedAnalysis(false)
 
         try {
             const res = await fetch(`${API}/api/capture/start`, {
@@ -318,6 +350,15 @@ export default function LiveMonitor() {
         } finally {
             setSimulating(false)
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Dismiss threat alert
+
+    // ------------------------------------------------------------------
+    const dismissThreatAlert = () => {
+        setThreatAlert(null)
+        setShowDetailedAnalysis(false)
     }
 
     // ------------------------------------------------------------------
@@ -614,6 +655,150 @@ export default function LiveMonitor() {
                     )}
                 </div>
             </div>
+
+            {/* ════════════════════════════════════════════════════════════
+                MALICIOUS URL THREAT ALERT OVERLAY
+            ════════════════════════════════════════════════════════════ */}
+            {threatAlert && (
+                <div className="threat-overlay" role="alertdialog" aria-modal="true">
+                    <div className="threat-card">
+                        {/* Pulsing danger icon */}
+                        <div className="threat-icon-ring">
+                            <ShieldAlert className="threat-icon" size={56} />
+                        </div>
+
+                        <h2 className="threat-title">⚠ MALICIOUS SEARCH DETECTED</h2>
+                        <p className="threat-subtitle">
+                            Packet capture has been <strong>automatically stopped</strong>.
+                            A potentially dangerous domain was detected in your network traffic.
+                        </p>
+
+                        <div className="threat-info-row">
+                            <div className="threat-info-item">
+                                <span className="threat-info-label">Detected Domain / URL</span>
+                                <span className="threat-info-value threat-domain">{threatAlert.domain}</span>
+                            </div>
+                            <div className="threat-info-item">
+                                <span className="threat-info-label">Matched Keyword</span>
+                                <span className="threat-info-value threat-keyword">{threatAlert.keyword}</span>
+                            </div>
+                            <div className="threat-info-item">
+                                <span className="threat-info-label">Protocol</span>
+                                <span className="threat-info-value">{threatAlert.protocol}</span>
+                            </div>
+                            <div className="threat-info-item">
+                                <span className="threat-info-label">Detected At</span>
+                                <span className="threat-info-value">{fmtTime(threatAlert.timestamp)}</span>
+                            </div>
+                        </div>
+
+                        <div className="threat-actions">
+                            <button
+                                className="threat-btn-detail"
+                                onClick={() => setShowDetailedAnalysis(v => !v)}
+                            >
+                                <Search size={18} />
+                                {showDetailedAnalysis ? 'Hide Details' : 'Detailed Analysis'}
+                            </button>
+                            <button className="threat-btn-dismiss" onClick={dismissThreatAlert}>
+                                <X size={18} /> Dismiss
+                            </button>
+                        </div>
+
+                        {/* ── Detailed Analysis Panel ── */}
+                        {showDetailedAnalysis && (
+                            <div className="threat-detail-panel">
+                                <h3 className="threat-detail-title">Detailed Threat Analysis</h3>
+
+                                <div className="threat-detail-grid">
+                                    <div className="threat-detail-section">
+                                        <h4>Traffic Information</h4>
+                                        <table className="threat-detail-table">
+                                            <tbody>
+                                                <tr>
+                                                    <td>Source IP</td>
+                                                    <td><code>{threatAlert.src_ip ?? '—'}</code></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Destination IP</td>
+                                                    <td><code>{threatAlert.dst_ip ?? '—'}</code></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Source Port</td>
+                                                    <td><code>{threatAlert.src_port || '—'}</code></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Destination Port</td>
+                                                    <td><code>{threatAlert.dst_port || '—'}</code></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Protocol</td>
+                                                    <td><code>{threatAlert.protocol}</code></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Packet Length</td>
+                                                    <td><code>{threatAlert.packet_length} bytes</code></td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+
+                                    <div className="threat-detail-section">
+                                        <h4>Threat Intelligence</h4>
+                                        <table className="threat-detail-table">
+                                            <tbody>
+                                                <tr>
+                                                    <td>Trigger Type</td>
+                                                    <td>
+                                                        <code>
+                                                            {threatAlert.protocol === 'UDP' && threatAlert.dst_port === 53
+                                                                ? 'DNS Query DPI'
+                                                                : 'HTTP Host Header DPI'}
+                                                        </code>
+                                                    </td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Matched Domain</td>
+                                                    <td><code>{threatAlert.domain}</code></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Matched Keyword</td>
+                                                    <td>
+                                                        <span className="threat-keyword-badge">{threatAlert.keyword}</span>
+                                                    </td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Detection Method</td>
+                                                    <td><code>Real-Time Deep Packet Inspection</code></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Action Taken</td>
+                                                    <td><span className="threat-action-badge">Capture Stopped</span></td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+
+                                    <div className="threat-detail-section threat-detail-full">
+                                        <h4>Plain-English Explanation</h4>
+                                        <p className="threat-explanation">
+                                            The IDS detected a network packet attempting to resolve or connect to the domain{' '}
+                                            <strong>"{threatAlert.domain}"</strong>, which contains the suspicious keyword{' '}
+                                            <strong>"{threatAlert.keyword}"</strong>. This was intercepted at{' '}
+                                            <strong>{fmtTime(threatAlert.timestamp)}</strong> via{' '}
+                                            <strong>Deep Packet Inspection (DPI)</strong> on a{' '}
+                                            <strong>{threatAlert.protocol}</strong> packet from{' '}
+                                            <strong>{threatAlert.src_ip ?? 'unknown'}</strong> to{' '}
+                                            <strong>{threatAlert.dst_ip ?? 'unknown'}</strong>.
+                                            Packet capture was immediately halted to prevent further data exfiltration or command-and-control communication.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
         </div>
     )
 }
