@@ -1,0 +1,9 @@
+malware
+phishing
+eicar.org
+badguy.com
+stealer
+trojan
+evilcorp
+malicious
+malicious.com

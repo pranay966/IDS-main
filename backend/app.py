@@ -421,6 +421,23 @@ def capture_analyze():
         "decisionRule": "safe:no_suspicious_packets_in_window",
     }
 
+    # IMPORTANT: If the real-time DPI engine caught a malicious URL during this capture session,
+    # override the ML output since ML (flow-based) cannot read URL content.
+    if hasattr(_active_session, 'url_threat_info') and _active_session.url_threat_info:
+        ti = _active_session.url_threat_info
+        result["prediction"] = "malicious"
+        result["confidence"] = 0.99
+        result["attackType"] = f"Malicious URL Output ({ti.get('keyword')})"
+        result["maliciousCount"] = suspicious_count or 1
+        result["decisionRule"] = "malicious:dpi_url_flagged"
+        
+        # Add the malicious domain strictly to top domains if not present
+        domain = ti.get("domain", "")
+        if domain and not any(d["value"] == domain for d in threatTargets["topDomains"]):
+            threatTargets["topDomains"].insert(0, {"value": domain, "count": 1})
+            
+        return jsonify(result)
+
     if suspicious_count == 0:
         # Confidence rises with amount of normal traffic in window
         confidence = 0.6 + 0.35 * min(1.0, normal_count / 50.0)
